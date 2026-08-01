@@ -269,6 +269,34 @@ services:
 docker-compose up -d --build
 ```
 
+## 使用说明 StrmPro
+
+StrmPro 用于刷新 OpenList `/d/` 地址中的过期签名。程序会先应用 `strm.path-map`，再解析 OpenList 资源路径，携带 `openlist.token` 请求 `/api/fs/get`，最后将客户端重定向到本次请求返回的实时链接。
+
+```yaml
+emby:
+  host: http://emby:8096
+  mount-path: /data
+  proxy-error-strategy: origin
+  strm:
+    # 如果 strm 已经是正确的 OpenList /d/ 地址，可以不配置 path-map
+    path-map:
+      - https://old-openlist.example.com => https://openlist.example.com
+    strmpro: true
+    internal-redirect-enable: false
+
+openlist:
+  host: https://openlist.example.com
+  token: openlist-your-api-token
+```
+
+注意事项：
+
+1. `path-map` 处理后的地址必须包含 OpenList `/d/` 路由，如 `https://openlist.example.com/d/电影/example.mkv`。
+2. 每次播放都会独立请求 OpenList API 获取实时链接，不复用上一次播放结果。
+3. 建议保持 `internal-redirect-enable: false`，直接将 OpenList 返回的链接交给客户端。
+4. OpenList token 属于敏感信息，只应保存在 `config.yml` 中，不要提交到仓库。
+
 ## 使用说明 ssl
 
 **使用方式：**
