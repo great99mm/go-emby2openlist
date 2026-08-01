@@ -23,6 +23,11 @@ emby:
     path-map:
       - https://test-res.com:8094 => http://localhost:8095
       - 12138 => 10086
+    # strmpro 模式
+    # 开启后, 程序会先应用上面的 path-map, 再从 OpenList /d/ 地址中解析资源路径
+    # 使用 openlist.host 和 openlist.token 请求实时直链, 避免 strm 内的签名过期
+    # 每次播放都会独立请求 OpenList API, 不复用上一次请求得到的直链
+    strmpro: false
     # 是否启用 strm 内部重定向
     #
     # 启用, 程序会在内部访问 strm 远程地址并重定向到最终地址后, 再重定向给客户端

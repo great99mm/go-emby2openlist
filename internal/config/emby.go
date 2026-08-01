@@ -133,6 +133,8 @@ func (e *Emby) IsLocalMediaPath(p string) bool {
 type Strm struct {
 	// PathMap 远程路径映射
 	PathMap []string `yaml:"path-map"`
+	// StrmPro 是否通过 Openlist API 将 strm 地址刷新为实时直链
+	StrmPro bool `yaml:"strmpro"`
 	// InternalRedirectEnable 是否启用 strm 内部重定向
 	InternalRedirectEnable bool `yaml:"internal-redirect-enable"`
 

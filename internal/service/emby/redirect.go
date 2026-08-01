@@ -93,10 +93,17 @@ func Redirect2OpenlistLink(c *gin.Context) {
 
 	// 4 如果是远程地址 (strm), 重定向处理
 	if urls.IsHttpRemote(embyPath) {
-		finalPath := config.C.Emby.Strm.MapPath(embyPath)
-		finalPath = getFinalRedirectLink(finalPath, c.Request.Header.Clone())
+		finalPath, err := resolveStrmLink(embyPath, c.Request.Header.Clone())
+		if checkErr(c, err) {
+			return
+		}
 		logs.Success("重定向 strm: %s", finalPath)
-		c.Header(cache.HeaderKeyExpired, cache.Duration(time.Minute*10))
+		if config.C.Emby.Strm.StrmPro {
+			c.Header(cache.HeaderKeyExpired, "-1")
+			c.Header("Cache-Control", "no-store")
+		} else {
+			c.Header(cache.HeaderKeyExpired, cache.Duration(time.Minute*10))
+		}
 		c.Redirect(http.StatusTemporaryRedirect, finalPath)
 
 		// 异步发送一个播放 Playback 请求, 触发 emby 解析 strm 视频格式
@@ -168,6 +175,64 @@ func Redirect2OpenlistLink(c *gin.Context) {
 	}
 
 	checkErr(c, fmt.Errorf("获取直链失败: %s", allErrors.String()))
+}
+
+// resolveStrmLink 应用 strm 路径映射，并按配置通过 Openlist API 刷新直链。
+func resolveStrmLink(strmURL string, header http.Header) (string, error) {
+	finalURL := config.C.Emby.Strm.MapPath(strmURL)
+	if config.C.Emby.Strm.StrmPro {
+		openlistPath, err := openlistPathFromStrmURL(finalURL)
+		if err != nil {
+			return "", err
+		}
+
+		logs.Info("strmpro 解析到 Openlist 路径: %s", openlistPath)
+		res := openlist.FetchResource(openlist.FetchInfo{
+			Path:   openlistPath,
+			Header: header,
+		})
+		if res.Code != http.StatusOK {
+			return "", fmt.Errorf("strmpro 获取 Openlist 直链失败, code: %d, msg: %s, path: %s", res.Code, res.Msg, openlistPath)
+		}
+		if strs.AnyEmpty(res.Data.Url) {
+			return "", fmt.Errorf("strmpro 获取到的 Openlist 直链为空, path: %s", openlistPath)
+		}
+		finalURL = res.Data.Url
+	}
+
+	return getFinalRedirectLink(finalURL, header), nil
+}
+
+// openlistPathFromStrmURL 从 Openlist /d/ 下载地址中提取资源绝对路径。
+func openlistPathFromStrmURL(rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("strmpro 解析 strm 地址失败: %w", err)
+	}
+	if u.Host == "" || (!strings.EqualFold(u.Scheme, "http") && !strings.EqualFold(u.Scheme, "https")) {
+		return "", fmt.Errorf("strmpro 仅支持 http/https 地址: %s", rawURL)
+	}
+
+	const downloadRoute = "/d/"
+	escapedPath := u.EscapedPath()
+	idx := strings.Index(escapedPath, downloadRoute)
+	if idx == -1 {
+		return "", fmt.Errorf("strmpro 地址不包含 Openlist /d/ 路由: %s", rawURL)
+	}
+
+	escapedPath = escapedPath[idx+len(downloadRoute):]
+	if escapedPath == "" {
+		return "", fmt.Errorf("strmpro 地址缺少 Openlist 资源路径: %s", rawURL)
+	}
+	openlistPath, err := url.PathUnescape(escapedPath)
+	if err != nil {
+		return "", fmt.Errorf("strmpro 解码 Openlist 路径失败: %w", err)
+	}
+	openlistPath = strings.TrimLeft(openlistPath, "/")
+	if openlistPath == "" {
+		return "", fmt.Errorf("strmpro 地址缺少 Openlist 资源路径: %s", rawURL)
+	}
+	return "/" + openlistPath, nil
 }
 
 // ProxyOriginalResource 拦截 original 接口

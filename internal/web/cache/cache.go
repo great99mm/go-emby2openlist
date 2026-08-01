@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/config"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/constant"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/encrypts"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/https"
@@ -47,16 +48,22 @@ var CacheKeyIgnoreParams = map[string]struct{}{
 // CacheableRouteMarker 缓存白名单
 // 只有匹配上正则表达式的路由才会被缓存
 func CacheableRouteMarker() gin.HandlerFunc {
+	resourceStreamPattern := regexp.MustCompile(constant.Reg_ResourceStream)
 	cacheablePatterns := []*regexp.Regexp{
 		regexp.MustCompile(constant.Reg_PlaybackInfo),
 		regexp.MustCompile(constant.Reg_VideoSubtitles),
-		regexp.MustCompile(constant.Reg_ResourceStream),
+		resourceStreamPattern,
 		regexp.MustCompile(constant.Reg_ItemDownload),
 		regexp.MustCompile(constant.Reg_ItemSyncDownload),
 		regexp.MustCompile(constant.Reg_UserItemsRandomWithLimit),
 	}
 
 	return func(c *gin.Context) {
+		// strmpro 必须为每次播放重新请求直链，不能复用媒体流的 302 缓存。
+		if config.C.Emby.Strm.StrmPro && resourceStreamPattern.MatchString(c.Request.RequestURI) {
+			c.Header(HeaderKeyExpired, "-1")
+			return
+		}
 		for _, pattern := range cacheablePatterns {
 			if pattern.MatchString(c.Request.RequestURI) {
 				return
