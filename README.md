@@ -292,10 +292,11 @@ openlist:
 
 注意事项：
 
-1. `path-map` 处理后的地址必须包含 OpenList `/d/` 路由，如 `https://openlist.example.com/d/电影/example.mkv`。
-2. 每次播放都会独立请求 OpenList API 获取实时链接，不复用上一次播放结果。
-3. 建议保持 `internal-redirect-enable: false`，直接将 OpenList 返回的链接交给客户端。
-4. OpenList token 属于敏感信息，只应保存在 `config.yml` 中，不要提交到仓库。
+1. 只有 `path-map` 处理后的主机名与 `openlist.host` 相同，才会调用 OpenList API；其他主机仍按普通 STRM 直接重定向。
+2. 匹配的地址必须包含 OpenList `/d/` 路由，如 `https://openlist.example.com/d/电影/example.mkv`。
+3. 每次 StrmPro 播放都会独立请求 OpenList API 获取实时链接，不复用上一次播放结果。
+4. 建议保持 `internal-redirect-enable: false`，直接将 OpenList 返回的链接交给客户端。
+5. OpenList token 属于敏感信息，只应保存在 `config.yml` 中，不要提交到仓库。
 
 ## 使用说明 ssl
 

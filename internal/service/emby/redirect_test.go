@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -91,7 +92,7 @@ func TestResolveStrmLinkWithStrmPro(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	strmConfig := &config.Strm{
-		PathMap: []string{"https://strm.example/media => https://openlist.example/d"},
+		PathMap: []string{fmt.Sprintf("https://strm.example/media => %s/d", server.URL)},
 		StrmPro: true,
 	}
 	if err := strmConfig.Init(); err != nil {
@@ -109,17 +110,18 @@ func TestResolveStrmLinkWithStrmPro(t *testing.T) {
 	}
 
 	type result struct {
-		link string
-		err  error
+		link     string
+		resolved bool
+		err      error
 	}
 	results := make(chan result, 2)
 	for _, userAgent := range []string{"strmpro-user-a", "strmpro-user-b"} {
 		go func() {
-			link, err := resolveStrmLink(
+			link, resolved, err := resolveStrmLink(
 				"https://strm.example/media/%E8%B7%AF%E5%BE%84/video%20name.mkv?sign=expired:0",
 				http.Header{"User-Agent": []string{userAgent}},
 			)
-			results <- result{link: link, err: err}
+			results <- result{link: link, resolved: resolved, err: err}
 		}()
 	}
 
@@ -128,6 +130,9 @@ func TestResolveStrmLinkWithStrmPro(t *testing.T) {
 		res := <-results
 		if res.err != nil {
 			t.Fatalf("resolveStrmLink() error = %v", res.err)
+		}
+		if !res.resolved {
+			t.Fatal("resolveStrmLink() resolved = false, want true")
 		}
 		links[res.link] = struct{}{}
 	}
@@ -169,11 +174,61 @@ func TestResolveStrmLinkWithoutStrmPro(t *testing.T) {
 	t.Cleanup(func() { config.C = oldConfig })
 	config.C = &config.Config{Emby: &config.Emby{Strm: strmConfig}}
 
-	got, err := resolveStrmLink("https://old.example/video.mkv", nil)
+	got, resolved, err := resolveStrmLink("https://old.example/video.mkv", nil)
 	if err != nil {
 		t.Fatalf("resolveStrmLink() error = %v", err)
 	}
+	if resolved {
+		t.Fatal("resolveStrmLink() resolved = true, want false")
+	}
 	if want := "https://new.example/video.mkv"; got != want {
 		t.Fatalf("resolveStrmLink() = %q, want %q", got, want)
+	}
+}
+
+func TestResolveStrmLinkWithForeignHost(t *testing.T) {
+	var openlistCalls atomic.Int32
+	openlistServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		openlistCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(openlistServer.Close)
+
+	var foreignCalls atomic.Int32
+	foreignServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		foreignCalls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(foreignServer.Close)
+	foreignURL := strings.Replace(foreignServer.URL, "127.0.0.1", "localhost", 1) + "/d/path/video.mkv"
+
+	oldConfig := config.C
+	t.Cleanup(func() { config.C = oldConfig })
+	config.C = &config.Config{
+		Emby: &config.Emby{Strm: &config.Strm{
+			StrmPro:                true,
+			InternalRedirectEnable: true,
+		}},
+		Openlist: &config.Openlist{
+			Host:  openlistServer.URL,
+			Token: "test-token",
+		},
+	}
+
+	got, resolved, err := resolveStrmLink(foreignURL, nil)
+	if err != nil {
+		t.Fatalf("resolveStrmLink() error = %v", err)
+	}
+	if resolved {
+		t.Fatal("resolveStrmLink() resolved = true, want false")
+	}
+	if got != foreignURL {
+		t.Fatalf("resolveStrmLink() = %q, want %q", got, foreignURL)
+	}
+	if openlistCalls.Load() != 0 {
+		t.Fatalf("Openlist API calls = %d, want 0", openlistCalls.Load())
+	}
+	if foreignCalls.Load() != 0 {
+		t.Fatalf("foreign host calls = %d, want 0", foreignCalls.Load())
 	}
 }

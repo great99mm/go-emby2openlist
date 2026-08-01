@@ -93,12 +93,12 @@ func Redirect2OpenlistLink(c *gin.Context) {
 
 	// 4 如果是远程地址 (strm), 重定向处理
 	if urls.IsHttpRemote(embyPath) {
-		finalPath, err := resolveStrmLink(embyPath, c.Request.Header.Clone())
+		finalPath, strmProResolved, err := resolveStrmLink(embyPath, c.Request.Header.Clone())
 		if checkErr(c, err) {
 			return
 		}
 		logs.Success("重定向 strm: %s", finalPath)
-		if config.C.Emby.Strm.StrmPro {
+		if strmProResolved {
 			c.Header(cache.HeaderKeyExpired, "-1")
 			c.Header("Cache-Control", "no-store")
 		} else {
@@ -178,12 +178,21 @@ func Redirect2OpenlistLink(c *gin.Context) {
 }
 
 // resolveStrmLink 应用 strm 路径映射，并按配置通过 Openlist API 刷新直链。
-func resolveStrmLink(strmURL string, header http.Header) (string, error) {
+func resolveStrmLink(strmURL string, header http.Header) (string, bool, error) {
 	finalURL := config.C.Emby.Strm.MapPath(strmURL)
 	if config.C.Emby.Strm.StrmPro {
+		hostMatched, err := isConfiguredOpenlistHost(finalURL)
+		if err != nil {
+			return "", false, err
+		}
+		if !hostMatched {
+			logs.Info("strmpro 地址主机名与 openlist.host 不匹配, 直接重定向: %s", finalURL)
+			return finalURL, false, nil
+		}
+
 		openlistPath, err := openlistPathFromStrmURL(finalURL)
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
 
 		logs.Info("strmpro 解析到 Openlist 路径: %s", openlistPath)
@@ -192,15 +201,35 @@ func resolveStrmLink(strmURL string, header http.Header) (string, error) {
 			Header: header,
 		})
 		if res.Code != http.StatusOK {
-			return "", fmt.Errorf("strmpro 获取 Openlist 直链失败, code: %d, msg: %s, path: %s", res.Code, res.Msg, openlistPath)
+			return "", false, fmt.Errorf("strmpro 获取 Openlist 直链失败, code: %d, msg: %s, path: %s", res.Code, res.Msg, openlistPath)
 		}
 		if strs.AnyEmpty(res.Data.Url) {
-			return "", fmt.Errorf("strmpro 获取到的 Openlist 直链为空, path: %s", openlistPath)
+			return "", false, fmt.Errorf("strmpro 获取到的 Openlist 直链为空, path: %s", openlistPath)
 		}
 		finalURL = res.Data.Url
+		return getFinalRedirectLink(finalURL, header), true, nil
 	}
 
-	return getFinalRedirectLink(finalURL, header), nil
+	return getFinalRedirectLink(finalURL, header), false, nil
+}
+
+// isConfiguredOpenlistHost 判断 strm 地址是否属于当前配置的 Openlist 主机。
+func isConfiguredOpenlistHost(rawURL string) (bool, error) {
+	strmURL, err := url.Parse(rawURL)
+	if err != nil {
+		return false, fmt.Errorf("strmpro 解析 strm 地址失败: %w", err)
+	}
+	openlistURL, err := url.Parse(config.C.Openlist.Host)
+	if err != nil {
+		return false, fmt.Errorf("strmpro 解析 openlist.host 失败: %w", err)
+	}
+
+	strmHost := strings.TrimSuffix(strings.ToLower(strmURL.Hostname()), ".")
+	openlistHost := strings.TrimSuffix(strings.ToLower(openlistURL.Hostname()), ".")
+	if strs.AnyEmpty(strmHost, openlistHost) {
+		return false, fmt.Errorf("strmpro 无法识别主机名, strm: %s, openlist.host: %s", rawURL, config.C.Openlist.Host)
+	}
+	return strmHost == openlistHost, nil
 }
 
 // openlistPathFromStrmURL 从 Openlist /d/ 下载地址中提取资源绝对路径。

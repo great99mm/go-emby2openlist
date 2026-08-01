@@ -26,6 +26,7 @@ emby:
     # strmpro 模式
     # 开启后, 程序会先应用上面的 path-map, 再从 OpenList /d/ 地址中解析资源路径
     # 使用 openlist.host 和 openlist.token 请求实时直链, 避免 strm 内的签名过期
+    # path-map 处理后的主机名与 openlist.host 不匹配时, 仍按普通 strm 直接重定向
     # 每次播放都会独立请求 OpenList API, 不复用上一次请求得到的直链
     strmpro: false
     # 是否启用 strm 内部重定向
