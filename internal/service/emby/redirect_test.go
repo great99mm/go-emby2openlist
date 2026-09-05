@@ -232,3 +232,54 @@ func TestResolveStrmLinkWithForeignHost(t *testing.T) {
 		t.Fatalf("foreign host calls = %d, want 0", foreignCalls.Load())
 	}
 }
+
+func TestResolveStrmLinkWithMatchedOpenlistInstance(t *testing.T) {
+	var otherCalls atomic.Int32
+	otherServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		otherCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(otherServer.Close)
+
+	var matchedCalls atomic.Int32
+	matchedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		matchedCalls.Add(1)
+		if got := r.Header.Get("Authorization"); got != "matched-token" {
+			t.Errorf("Authorization = %q, want %q", got, "matched-token")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"code":200,"message":"success","data":{"raw_url":"https://storage.example/matched.mkv"}}`)
+	}))
+	t.Cleanup(matchedServer.Close)
+
+	oldConfig := config.C
+	t.Cleanup(func() { config.C = oldConfig })
+	config.C = &config.Config{
+		Emby: &config.Emby{Strm: &config.Strm{
+			StrmPro: true,
+			StrmProInstances: []config.OpenlistInstance{
+				{Host: otherServer.URL, Token: "other-token"},
+				{Host: strings.Replace(matchedServer.URL, "127.0.0.1", "localhost", 1), Token: "matched-token"},
+			},
+		}},
+		Openlist: &config.Openlist{
+			Host:  otherServer.URL,
+			Token: "legacy-token",
+		},
+	}
+
+	matchedURL := strings.Replace(matchedServer.URL, "127.0.0.1", "localhost", 1) + "/d/path/video.mkv"
+	got, resolved, err := resolveStrmLink(matchedURL, nil)
+	if err != nil {
+		t.Fatalf("resolveStrmLink() error = %v", err)
+	}
+	if !resolved {
+		t.Fatal("resolveStrmLink() resolved = false, want true")
+	}
+	if got != "https://storage.example/matched.mkv" {
+		t.Fatalf("resolveStrmLink() = %q, want %q", got, "https://storage.example/matched.mkv")
+	}
+	if otherCalls.Load() != 0 || matchedCalls.Load() != 1 {
+		t.Fatalf("Openlist API calls = other %d, matched %d; want other 0, matched 1", otherCalls.Load(), matchedCalls.Load())
+	}
+}

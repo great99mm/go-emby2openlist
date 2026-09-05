@@ -18,6 +18,11 @@ import (
 
 // FetchResource 请求 openlist 资源 url 直链
 func FetchResource(fi FetchInfo) model.HttpRes[Resource] {
+	return FetchResourceFrom(fi, config.C.Openlist.Host, config.C.Openlist.Token)
+}
+
+// FetchResourceFrom 使用指定 Openlist 实例请求资源直链。
+func FetchResourceFrom(fi FetchInfo, host, token string) model.HttpRes[Resource] {
 	if strs.AnyEmpty(fi.Path) {
 		return model.HttpRes[Resource]{Code: http.StatusBadRequest, Msg: "参数 path 不能为空"}
 	}
@@ -25,7 +30,7 @@ func FetchResource(fi FetchInfo) model.HttpRes[Resource] {
 
 	if !fi.UseTranscode {
 		// 请求原画资源
-		res := FetchFsGet(fi.Path, fi.Header)
+		res := FetchFsGetFrom(fi.Path, fi.Header, host, token)
 		if res.Code == http.StatusOK {
 			return model.HttpRes[Resource]{Code: http.StatusOK, Data: Resource{Url: res.Data.RawUrl}}
 		}
@@ -39,11 +44,11 @@ func FetchResource(fi FetchInfo) model.HttpRes[Resource] {
 		}
 		logs.Error("请求转码资源失败, 尝试请求原画资源, 原始响应: %v", jsons.FromObject(originRes))
 		fi.UseTranscode = false
-		return FetchResource(fi)
+		return FetchResourceFrom(fi, host, token)
 	}
 
 	// 请求转码资源
-	res := FetchFsOther(fi.Path, fi.Header)
+	res := FetchFsOtherFrom(fi.Path, fi.Header, host, token)
 	if res.Code != http.StatusOK {
 		return failedAndTryRaw(res)
 	}
@@ -108,6 +113,11 @@ func FetchFsList(path string, header http.Header) model.HttpRes[FsList] {
 //
 // 传入 path 与接口的 path 作用一致
 func FetchFsGet(path string, header http.Header) model.HttpRes[FsGet] {
+	return FetchFsGetFrom(path, header, config.C.Openlist.Host, config.C.Openlist.Token)
+}
+
+// FetchFsGetFrom 使用指定 Openlist 实例请求 "/api/fs/get" 接口。
+func FetchFsGetFrom(path string, header http.Header, host, token string) model.HttpRes[FsGet] {
 	if strs.AnyEmpty(path) {
 		return model.HttpRes[FsGet]{Code: http.StatusBadRequest, Msg: "参数 path 不能为空"}
 	}
@@ -116,7 +126,7 @@ func FetchFsGet(path string, header http.Header) model.HttpRes[FsGet] {
 	defer removeMainApiRunner()
 
 	var res FsGet
-	err := Fetch("/api/fs/get", http.MethodPost, header, map[string]any{
+	err := FetchFrom(host, token, "/api/fs/get", http.MethodPost, header, map[string]any{
 		"refresh":  false,
 		"password": "",
 		"path":     path,
@@ -131,6 +141,11 @@ func FetchFsGet(path string, header http.Header) model.HttpRes[FsGet] {
 //
 // 传入 path 与接口的 path 作用一致
 func FetchFsOther(path string, header http.Header) model.HttpRes[FsOther] {
+	return FetchFsOtherFrom(path, header, config.C.Openlist.Host, config.C.Openlist.Token)
+}
+
+// FetchFsOtherFrom 使用指定 Openlist 实例请求 "/api/fs/other" 接口。
+func FetchFsOtherFrom(path string, header http.Header, host, token string) model.HttpRes[FsOther] {
 	if strs.AnyEmpty(path) {
 		return model.HttpRes[FsOther]{Code: http.StatusBadRequest, Msg: "参数 path 不能为空"}
 	}
@@ -139,7 +154,7 @@ func FetchFsOther(path string, header http.Header) model.HttpRes[FsOther] {
 	defer removeMainApiRunner()
 
 	var res FsOther
-	err := Fetch("/api/fs/other", http.MethodPost, header, map[string]any{
+	err := FetchFrom(host, token, "/api/fs/other", http.MethodPost, header, map[string]any{
 		"method":   "video_preview",
 		"password": "",
 		"path":     path,
@@ -152,8 +167,11 @@ func FetchFsOther(path string, header http.Header) model.HttpRes[FsOther] {
 
 // Fetch 请求 openlist api, 响应封装在 v 指针指向的结构中
 func Fetch(uri, method string, header http.Header, body map[string]any, v any, closeConn bool) error {
-	host := config.C.Openlist.Host
-	token := config.C.Openlist.Token
+	return FetchFrom(config.C.Openlist.Host, config.C.Openlist.Token, uri, method, header, body, v, closeConn)
+}
+
+// FetchFrom 请求指定 openlist 实例的 api。
+func FetchFrom(host, token, uri, method string, header http.Header, body map[string]any, v any, closeConn bool) error {
 	if strs.AnyEmpty(host, token) {
 		return fmt.Errorf("openlist.host 或 openlist.token 配置为空")
 	}

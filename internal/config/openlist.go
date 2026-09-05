@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/lib/ffmpeg"
@@ -17,6 +18,11 @@ type Openlist struct {
 	LocalTreeGen *LocalTreeGen `yaml:"local-tree-gen"`
 }
 
+type OpenlistInstance struct {
+	Host  string `yaml:"host"`
+	Token string `yaml:"token"`
+}
+
 func (a *Openlist) Init() error {
 	if a.LocalTreeGen == nil {
 		a.LocalTreeGen = new(LocalTreeGen)
@@ -26,6 +32,36 @@ func (a *Openlist) Init() error {
 	}
 
 	return nil
+}
+
+// MatchOpenlistInstance 按 URL 主机名匹配 Openlist 实例。
+func MatchOpenlistInstance(rawURL string, instances []OpenlistInstance) (OpenlistInstance, bool, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return OpenlistInstance{}, false, fmt.Errorf("解析 strm 地址失败: %w", err)
+	}
+	hostname := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if hostname == "" {
+		return OpenlistInstance{}, false, fmt.Errorf("无法识别 strm 地址主机名: %s", rawURL)
+	}
+
+	for _, instance := range instances {
+		if instance.Host == "" {
+			continue
+		}
+		instanceURL, err := url.Parse(instance.Host)
+		if err != nil {
+			return OpenlistInstance{}, false, fmt.Errorf("解析 openlist host 失败: %w", err)
+		}
+		instanceHostname := strings.TrimSuffix(strings.ToLower(instanceURL.Hostname()), ".")
+		if instanceHostname == "" {
+			return OpenlistInstance{}, false, fmt.Errorf("无法识别 openlist host: %s", instance.Host)
+		}
+		if hostname == instanceHostname {
+			return instance, true, nil
+		}
+	}
+	return OpenlistInstance{}, false, nil
 }
 
 type LocalTreeGen struct {

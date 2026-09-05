@@ -271,7 +271,7 @@ docker-compose up -d --build
 
 ## 使用说明 StrmPro
 
-StrmPro 用于刷新 OpenList `/d/` 地址中的过期签名。程序会先应用 `strm.path-map`，再解析 OpenList 资源路径，携带 `openlist.token` 请求 `/api/fs/get`，最后将客户端重定向到本次请求返回的实时链接。
+StrmPro 用于刷新 OpenList `/d/` 地址中的过期签名。程序会先应用 `strm.path-map`，再按地址主机名从 `strmpro-instances` 中选择 OpenList，携带对应 token 请求 `/api/fs/get`，最后将客户端重定向到本次请求返回的实时链接。
 
 ```yaml
 emby:
@@ -283,6 +283,11 @@ emby:
     path-map:
       - https://old-openlist.example.com => https://openlist.example.com
     strmpro: true
+    strmpro-instances:
+      - host: https://openlist.example.com
+        token: openlist-your-api-token
+      - host: https://another-openlist.example.com
+        token: another-openlist-api-token
     internal-redirect-enable: false
 
 openlist:
@@ -292,11 +297,12 @@ openlist:
 
 注意事项：
 
-1. 只有 `path-map` 处理后的主机名与 `openlist.host` 相同，才会调用 OpenList API；其他主机仍按普通 STRM 直接重定向。
+1. 只有 `path-map` 处理后的主机名与某个 `strmpro-instances[].host` 相同，才会调用对应 OpenList API；其他主机仍按普通 STRM 直接重定向。
 2. 匹配的地址必须包含 OpenList `/d/` 路由，如 `https://openlist.example.com/d/电影/example.mkv`。
 3. 每次 StrmPro 播放都会独立请求 OpenList API 获取实时链接，不复用上一次播放结果。
 4. 建议保持 `internal-redirect-enable: false`，直接将 OpenList 返回的链接交给客户端。
 5. OpenList token 属于敏感信息，只应保存在 `config.yml` 中，不要提交到仓库。
+6. 未配置 `strmpro-instances` 时会继续使用 `openlist.host/token`，兼容原有单实例配置。
 
 ## 使用说明 ssl
 

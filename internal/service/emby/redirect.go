@@ -181,12 +181,19 @@ func Redirect2OpenlistLink(c *gin.Context) {
 func resolveStrmLink(strmURL string, header http.Header) (string, bool, error) {
 	finalURL := config.C.Emby.Strm.MapPath(strmURL)
 	if config.C.Emby.Strm.StrmPro {
-		hostMatched, err := isConfiguredOpenlistHost(finalURL)
+		instances := config.C.Emby.Strm.StrmProInstances
+		if len(instances) == 0 {
+			instances = []config.OpenlistInstance{{
+				Host:  config.C.Openlist.Host,
+				Token: config.C.Openlist.Token,
+			}}
+		}
+		instance, hostMatched, err := config.MatchOpenlistInstance(finalURL, instances)
 		if err != nil {
-			return "", false, err
+			return "", false, fmt.Errorf("strmpro %w", err)
 		}
 		if !hostMatched {
-			logs.Info("strmpro 地址主机名与 openlist.host 不匹配, 直接重定向: %s", finalURL)
+			logs.Info("strmpro 地址主机名与已配置的 openlist 实例不匹配, 直接重定向: %s", finalURL)
 			return finalURL, false, nil
 		}
 
@@ -196,10 +203,10 @@ func resolveStrmLink(strmURL string, header http.Header) (string, bool, error) {
 		}
 
 		logs.Info("strmpro 解析到 Openlist 路径: %s", openlistPath)
-		res := openlist.FetchResource(openlist.FetchInfo{
+		res := openlist.FetchResourceFrom(openlist.FetchInfo{
 			Path:   openlistPath,
 			Header: header,
-		})
+		}, instance.Host, instance.Token)
 		if res.Code != http.StatusOK {
 			return "", false, fmt.Errorf("strmpro 获取 Openlist 直链失败, code: %d, msg: %s, path: %s", res.Code, res.Msg, openlistPath)
 		}
@@ -211,25 +218,6 @@ func resolveStrmLink(strmURL string, header http.Header) (string, bool, error) {
 	}
 
 	return getFinalRedirectLink(finalURL, header), false, nil
-}
-
-// isConfiguredOpenlistHost 判断 strm 地址是否属于当前配置的 Openlist 主机。
-func isConfiguredOpenlistHost(rawURL string) (bool, error) {
-	strmURL, err := url.Parse(rawURL)
-	if err != nil {
-		return false, fmt.Errorf("strmpro 解析 strm 地址失败: %w", err)
-	}
-	openlistURL, err := url.Parse(config.C.Openlist.Host)
-	if err != nil {
-		return false, fmt.Errorf("strmpro 解析 openlist.host 失败: %w", err)
-	}
-
-	strmHost := strings.TrimSuffix(strings.ToLower(strmURL.Hostname()), ".")
-	openlistHost := strings.TrimSuffix(strings.ToLower(openlistURL.Hostname()), ".")
-	if strs.AnyEmpty(strmHost, openlistHost) {
-		return false, fmt.Errorf("strmpro 无法识别主机名, strm: %s, openlist.host: %s", rawURL, config.C.Openlist.Host)
-	}
-	return strmHost == openlistHost, nil
 }
 
 // openlistPathFromStrmURL 从 Openlist /d/ 下载地址中提取资源绝对路径。

@@ -135,6 +135,8 @@ type Strm struct {
 	PathMap []string `yaml:"path-map"`
 	// StrmPro 是否通过 Openlist API 将 strm 地址刷新为实时直链
 	StrmPro bool `yaml:"strmpro"`
+	// StrmProInstances StrmPro 按地址主机名匹配的 Openlist 实例
+	StrmProInstances []OpenlistInstance `yaml:"strmpro-instances"`
 	// InternalRedirectEnable 是否启用 strm 内部重定向
 	InternalRedirectEnable bool `yaml:"internal-redirect-enable"`
 
