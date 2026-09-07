@@ -214,7 +214,11 @@ func resolveStrmLink(strmURL string, header http.Header) (string, bool, error) {
 			return "", false, fmt.Errorf("strmpro 获取到的 Openlist 直链为空, path: %s", openlistPath)
 		}
 		finalURL = res.Data.Url
-		return getFinalRedirectLink(finalURL, header), true, nil
+		internalRedirectEnable := config.C.Emby.Strm.InternalRedirectEnable
+		if instance.InternalRedirectEnable != nil {
+			internalRedirectEnable = *instance.InternalRedirectEnable
+		}
+		return getFinalRedirectLinkWithSetting(finalURL, header, internalRedirectEnable), true, nil
 	}
 
 	return getFinalRedirectLink(finalURL, header), false, nil
@@ -307,8 +311,11 @@ func checkErr(c *gin.Context, err error) bool {
 //
 // 请求中途出现任何失败都会返回原始链接
 func getFinalRedirectLink(originLink string, header http.Header) string {
+	return getFinalRedirectLinkWithSetting(originLink, header, config.C.Emby.Strm.InternalRedirectEnable)
+}
 
-	if !config.C.Emby.Strm.InternalRedirectEnable {
+func getFinalRedirectLinkWithSetting(originLink string, header http.Header, internalRedirectEnable bool) string {
+	if !internalRedirectEnable {
 		logs.Info("internal-redirect-enable 未启用, 使用原始链接")
 		return originLink
 	}

@@ -288,6 +288,7 @@ emby:
         token: openlist-your-api-token
       - host: https://another-openlist.example.com
         token: another-openlist-api-token
+        internal-redirect-enable: true
     internal-redirect-enable: false
 
 openlist:
@@ -303,6 +304,7 @@ openlist:
 4. 建议保持 `internal-redirect-enable: false`，直接将 OpenList 返回的链接交给客户端。
 5. OpenList token 属于敏感信息，只应保存在 `config.yml` 中，不要提交到仓库。
 6. 未配置 `strmpro-instances` 时会继续使用 `openlist.host/token`，兼容原有单实例配置。
+7. 实例可单独配置 `internal-redirect-enable`；未配置时继承 `strm.internal-redirect-enable`。
 
 ## 使用说明 ssl
 

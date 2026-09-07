@@ -19,8 +19,9 @@ type Openlist struct {
 }
 
 type OpenlistInstance struct {
-	Host  string `yaml:"host"`
-	Token string `yaml:"token"`
+	Host                   string `yaml:"host"`
+	Token                  string `yaml:"token"`
+	InternalRedirectEnable *bool  `yaml:"internal-redirect-enable"`
 }
 
 func (a *Openlist) Init() error {

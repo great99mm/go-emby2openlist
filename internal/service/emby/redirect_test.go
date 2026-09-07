@@ -283,3 +283,45 @@ func TestResolveStrmLinkWithMatchedOpenlistInstance(t *testing.T) {
 		t.Fatalf("Openlist API calls = other %d, matched %d; want other 0, matched 1", otherCalls.Load(), matchedCalls.Load())
 	}
 }
+
+func TestResolveStrmLinkWithInstanceInternalRedirect(t *testing.T) {
+	finalServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(finalServer.Close)
+
+	redirectServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, finalServer.URL+"/video.mkv", http.StatusFound)
+	}))
+	t.Cleanup(redirectServer.Close)
+
+	openlistServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"code":200,"message":"success","data":{"raw_url":%q}}`, redirectServer.URL+"/redirect")
+	}))
+	t.Cleanup(openlistServer.Close)
+
+	enabled := true
+	oldConfig := config.C
+	t.Cleanup(func() { config.C = oldConfig })
+	config.C = &config.Config{
+		Emby: &config.Emby{Strm: &config.Strm{
+			StrmPro: true,
+			StrmProInstances: []config.OpenlistInstance{
+				{Host: openlistServer.URL, Token: "test-token", InternalRedirectEnable: &enabled},
+			},
+		}},
+		Openlist: &config.Openlist{},
+	}
+
+	got, resolved, err := resolveStrmLink(openlistServer.URL+"/d/path/video.mkv", nil)
+	if err != nil {
+		t.Fatalf("resolveStrmLink() error = %v", err)
+	}
+	if !resolved {
+		t.Fatal("resolveStrmLink() resolved = false, want true")
+	}
+	if want := finalServer.URL + "/video.mkv"; got != want {
+		t.Fatalf("resolveStrmLink() = %q, want %q", got, want)
+	}
+}
