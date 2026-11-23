@@ -178,50 +178,69 @@ func Redirect2OpenlistLink(c *gin.Context) {
 }
 
 // resolveStrmLink 应用 strm 路径映射，并按配置通过 Openlist API 刷新直链。
+// 当命中的路径映射包含多个候选目标时，按随机洗牌后的顺序执行负载均衡；
+// 在 StrmPro 模式下，若首选节点请求失败会自动回退到其余候选节点。
 func resolveStrmLink(strmURL string, header http.Header) (string, bool, error) {
-	finalURL := config.C.Emby.Strm.MapPath(strmURL)
-	if config.C.Emby.Strm.StrmPro {
-		instances := config.C.Emby.Strm.StrmProInstances
-		if len(instances) == 0 {
-			instances = []config.OpenlistInstance{{
-				Host:  config.C.Openlist.Host,
-				Token: config.C.Openlist.Token,
-			}}
-		}
-		instance, hostMatched, err := config.MatchOpenlistInstance(finalURL, instances)
-		if err != nil {
-			return "", false, fmt.Errorf("strmpro %w", err)
-		}
-		if !hostMatched {
-			logs.Info("strmpro 地址主机名与已配置的 openlist 实例不匹配, 直接重定向: %s", finalURL)
-			return finalURL, false, nil
-		}
-
-		openlistPath, err := openlistPathFromStrmURL(finalURL)
-		if err != nil {
-			return "", false, err
-		}
-
-		logs.Info("strmpro 解析到 Openlist 路径: %s", openlistPath)
-		res := openlist.FetchResourceFrom(openlist.FetchInfo{
-			Path:   openlistPath,
-			Header: header,
-		}, instance.Host, instance.Token)
-		if res.Code != http.StatusOK {
-			return "", false, fmt.Errorf("strmpro 获取 Openlist 直链失败, code: %d, msg: %s, path: %s", res.Code, res.Msg, openlistPath)
-		}
-		if strs.AnyEmpty(res.Data.Url) {
-			return "", false, fmt.Errorf("strmpro 获取到的 Openlist 直链为空, path: %s", openlistPath)
-		}
-		finalURL = res.Data.Url
-		internalRedirectEnable := config.C.Emby.Strm.InternalRedirectEnable
-		if instance.InternalRedirectEnable != nil {
-			internalRedirectEnable = *instance.InternalRedirectEnable
-		}
-		return getFinalRedirectLinkWithSetting(finalURL, header, internalRedirectEnable), true, nil
+	candidates := config.C.Emby.Strm.MapPathCandidates(strmURL)
+	if !config.C.Emby.Strm.StrmPro {
+		return getFinalRedirectLink(candidates[0], header), false, nil
 	}
 
-	return getFinalRedirectLink(finalURL, header), false, nil
+	instances := config.C.Emby.Strm.StrmProInstances
+	if len(instances) == 0 {
+		instances = []config.OpenlistInstance{{
+			Host:  config.C.Openlist.Host,
+			Token: config.C.Openlist.Token,
+		}}
+	}
+
+	errs := make([]string, 0, len(candidates))
+	for idx, candidateURL := range candidates {
+		finalURL, resolved, err := resolveStrmProCandidate(candidateURL, header, instances)
+		if err == nil {
+			return finalURL, resolved, nil
+		}
+		errs = append(errs, err.Error())
+		if idx < len(candidates)-1 {
+			logs.Warn("strmpro 候选节点解析失败, 尝试下一个候选节点: %v", err)
+		}
+	}
+	return "", false, fmt.Errorf("%s", strings.Join(errs, "; "))
+}
+
+// resolveStrmProCandidate 使用与候选地址主机名匹配的 Openlist 实例解析实时直链。
+func resolveStrmProCandidate(candidateURL string, header http.Header, instances []config.OpenlistInstance) (string, bool, error) {
+	instance, hostMatched, err := config.MatchOpenlistInstance(candidateURL, instances)
+	if err != nil {
+		return "", false, fmt.Errorf("strmpro %w", err)
+	}
+	if !hostMatched {
+		logs.Info("strmpro 地址主机名与已配置的 openlist 实例不匹配, 直接重定向: %s", candidateURL)
+		return candidateURL, false, nil
+	}
+
+	openlistPath, err := openlistPathFromStrmURL(candidateURL)
+	if err != nil {
+		return "", false, err
+	}
+
+	logs.Info("strmpro 使用实例 [%s] 解析 Openlist 路径: %s", instance.Host, openlistPath)
+	res := openlist.FetchResourceFrom(openlist.FetchInfo{
+		Path:   openlistPath,
+		Header: header,
+	}, instance.Host, instance.Token)
+	if res.Code != http.StatusOK {
+		return "", false, fmt.Errorf("strmpro 获取 Openlist 直链失败, host: %s, code: %d, msg: %s, path: %s", instance.Host, res.Code, res.Msg, openlistPath)
+	}
+	if strs.AnyEmpty(res.Data.Url) {
+		return "", false, fmt.Errorf("strmpro 获取到的 Openlist 直链为空, host: %s, path: %s", instance.Host, openlistPath)
+	}
+
+	internalRedirectEnable := config.C.Emby.Strm.InternalRedirectEnable
+	if instance.InternalRedirectEnable != nil {
+		internalRedirectEnable = *instance.InternalRedirectEnable
+	}
+	return getFinalRedirectLinkWithSetting(res.Data.Url, header, internalRedirectEnable), true, nil
 }
 
 // openlistPathFromStrmURL 从 Openlist /d/ 下载地址中提取资源绝对路径。

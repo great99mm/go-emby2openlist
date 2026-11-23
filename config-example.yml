@@ -15,11 +15,14 @@ emby:
   strm: # 远程视频 strm 配置
     # 路径映射, 将 strm 文件内的路径片段替换成指定路径片段
     # 可配置多个映射, 每个映射需要有 2 个片段, 使用 [=>] 符号进行分割, 程序自上而下映射第一个匹配的结果
+    # 支持在 [=>] 右侧使用 [|] 配置多个目标, 或重复配置相同源片段, 命中后会随机均衡分流到多个目标
+    # 在 strmpro 模式下, 若随机选中的节点请求失败, 会自动回退尝试同规则下的其余候选节点
     # 这个配置的映射是比较灵活的, 不一定必须按照前缀映射, 可以直接将地址中间的片段给替换掉
     #
     # 举个栗子
     # strm 文件内容: https://test-res.com:8094/1.mp4, 替换结果: http://localhost:8095/1.mp4
     # strm 文件内容: https://test-res.com:12138/test-id-12138.mp4, 替换结果: https://test-res.com:10086/test-id-12138.mp4
+    # 负载均衡示例: https://old-openlist.example.com => https://node1.example.com | https://node2.example.com
     path-map:
       - https://test-res.com:8094 => http://localhost:8095
       - 12138 => 10086

@@ -280,8 +280,10 @@ emby:
   proxy-error-strategy: origin
   strm:
     # 如果 strm 已经是正确的 OpenList /d/ 地址，可以不配置 path-map
+    # 支持在 => 右侧用 | 配置多个目标（或重复同一源片段）实现随机负载均衡，节点异常时自动回退其余候选节点
     path-map:
-      - https://old-openlist.example.com => https://openlist.example.com
+      - https://old-openlist.example.com/d/local/ => https://local-openlist.example.com/d/local/
+      - https://old-openlist.example.com => https://openlist.example.com | https://another-openlist.example.com
     strmpro: true
     strmpro-instances:
       - host: https://openlist.example.com

@@ -3,6 +3,7 @@ package emby
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -323,5 +324,207 @@ func TestResolveStrmLinkWithInstanceInternalRedirect(t *testing.T) {
 	}
 	if want := finalServer.URL + "/video.mkv"; got != want {
 		t.Fatalf("resolveStrmLink() = %q, want %q", got, want)
+	}
+}
+
+func TestResolveStrmLinkLoadBalanceAndSpecificRule(t *testing.T) {
+	// 使用三个独立本地测试服务分别模拟 fr、de、ch1，并通过不同主机别名区分实例。
+	var frCalls, deCalls, ch1Calls atomic.Int32
+
+	frServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		frCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"code":200,"message":"success","data":{"raw_url":"https://fr-storage.example/mplocal.mkv"}}`)
+	}))
+	t.Cleanup(frServer.Close)
+
+	deServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"code":200,"message":"success","data":{"raw_url":"https://de-storage.example/video.mkv"}}`)
+	}))
+	t.Cleanup(deServer.Close)
+
+	ch1Listener, err := net.Listen("tcp", "127.0.0.2:0")
+	if err != nil {
+		t.Fatalf("listen 127.0.0.2: %v", err)
+	}
+	ch1Server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ch1Calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"code":200,"message":"success","data":{"raw_url":"https://ch1-storage.example/video.mkv"}}`)
+	}))
+	ch1Server.Listener = ch1Listener
+	ch1Server.Start()
+	t.Cleanup(ch1Server.Close)
+
+	// MatchOpenlistInstance 按主机名匹配，使用 localhost / 127.0.0.1 / 127.0.0.2 区分三个实例。
+	frHost := strings.Replace(frServer.URL, "127.0.0.1", "localhost", 1)
+	deHost := deServer.URL
+	ch1Host := ch1Server.URL
+
+	strmConfig := &config.Strm{
+		PathMap: []string{
+			fmt.Sprintf("http://nl.example/d/mplocal/ => %s/d/mplocal/", frHost),
+			fmt.Sprintf("http://nl.example/ => %s/ | %s/", deHost, ch1Host),
+		},
+		StrmPro: true,
+		StrmProInstances: []config.OpenlistInstance{
+			{Host: frHost, Token: "shared-token"},
+			{Host: deHost, Token: "shared-token"},
+			{Host: ch1Host, Token: "shared-token"},
+		},
+	}
+	if err := strmConfig.Init(); err != nil {
+		t.Fatalf("init strm config: %v", err)
+	}
+
+	oldConfig := config.C
+	t.Cleanup(func() { config.C = oldConfig })
+	config.C = &config.Config{
+		Emby:     &config.Emby{Strm: strmConfig},
+		Openlist: &config.Openlist{},
+	}
+
+	// 验证 mplocal 始终只命中 fr 实例。
+	for range 10 {
+		got, resolved, err := resolveStrmLink("http://nl.example/d/mplocal/test.mkv", nil)
+		if err != nil {
+			t.Fatalf("resolveStrmLink(mplocal) error = %v", err)
+		}
+		if !resolved || got != "https://fr-storage.example/mplocal.mkv" {
+			t.Fatalf("resolveStrmLink(mplocal) = (%q, %v), want fr link", got, resolved)
+		}
+	}
+	if frCalls.Load() != 10 || deCalls.Load() != 0 || ch1Calls.Load() != 0 {
+		t.Fatalf("mplocal calls = fr:%d de:%d ch1:%d, want fr:10 de:0 ch1:0", frCalls.Load(), deCalls.Load(), ch1Calls.Load())
+	}
+
+	// 验证其余路径随机均衡打到 de 与 ch1，不打到 fr。
+	const generalRuns = 60
+	for range generalRuns {
+		got, resolved, err := resolveStrmLink("http://nl.example/d/cloudreve-upload/test.mp4", nil)
+		if err != nil {
+			t.Fatalf("resolveStrmLink(general) error = %v", err)
+		}
+		if !resolved || (got != "https://de-storage.example/video.mkv" && got != "https://ch1-storage.example/video.mkv") {
+			t.Fatalf("resolveStrmLink(general) = (%q, %v), want de or ch1 link", got, resolved)
+		}
+	}
+	if frCalls.Load() != 10 {
+		t.Fatalf("general path unexpectedly hit fr: frCalls=%d, want 10", frCalls.Load())
+	}
+	if deCalls.Load() == 0 || ch1Calls.Load() == 0 || deCalls.Load()+ch1Calls.Load() != generalRuns {
+		t.Fatalf("load balance calls = de:%d ch1:%d, want both > 0 and sum=%d", deCalls.Load(), ch1Calls.Load(), generalRuns)
+	}
+}
+
+func TestResolveStrmLinkLoadBalanceFailover(t *testing.T) {
+	var brokenCalls, healthyCalls atomic.Int32
+
+	brokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		brokenCalls.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(brokenServer.Close)
+
+	healthyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		healthyCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"code":200,"message":"success","data":{"raw_url":"https://healthy-storage.example/video.mkv"}}`)
+	}))
+	t.Cleanup(healthyServer.Close)
+
+	brokenHost := brokenServer.URL
+	healthyHost := strings.Replace(healthyServer.URL, "127.0.0.1", "localhost", 1)
+
+	strmConfig := &config.Strm{
+		PathMap: []string{
+			fmt.Sprintf("http://nl.example/ => %s/ | %s/", brokenHost, healthyHost),
+		},
+		StrmPro: true,
+		StrmProInstances: []config.OpenlistInstance{
+			{Host: brokenHost, Token: "shared-token"},
+			{Host: healthyHost, Token: "shared-token"},
+		},
+	}
+	if err := strmConfig.Init(); err != nil {
+		t.Fatalf("init strm config: %v", err)
+	}
+
+	oldConfig := config.C
+	t.Cleanup(func() { config.C = oldConfig })
+	config.C = &config.Config{
+		Emby:     &config.Emby{Strm: strmConfig},
+		Openlist: &config.Openlist{},
+	}
+
+	// 多次请求覆盖两种随机顺序，无论是否先命中故障节点都应自动回退成功。
+	const runs = 30
+	for range runs {
+		got, resolved, err := resolveStrmLink("http://nl.example/d/cloudreve-upload/test.mp4", nil)
+		if err != nil {
+			t.Fatalf("resolveStrmLink() error = %v, want failover success", err)
+		}
+		if !resolved || got != "https://healthy-storage.example/video.mkv" {
+			t.Fatalf("resolveStrmLink() = (%q, %v), want healthy link", got, resolved)
+		}
+	}
+	if healthyCalls.Load() != runs {
+		t.Fatalf("healthyCalls = %d, want %d", healthyCalls.Load(), runs)
+	}
+	if brokenCalls.Load() == 0 {
+		t.Fatalf("brokenCalls = 0, expected random selection to exercise failover path")
+	}
+}
+
+func TestResolveStrmLinkLoadBalanceAllFail(t *testing.T) {
+	var firstCalls, secondCalls atomic.Int32
+
+	firstServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		firstCalls.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(firstServer.Close)
+
+	secondServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondCalls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(secondServer.Close)
+
+	firstHost := firstServer.URL
+	secondHost := strings.Replace(secondServer.URL, "127.0.0.1", "localhost", 1)
+
+	strmConfig := &config.Strm{
+		PathMap: []string{
+			fmt.Sprintf("http://nl.example/ => %s/ | %s/", firstHost, secondHost),
+		},
+		StrmPro: true,
+		StrmProInstances: []config.OpenlistInstance{
+			{Host: firstHost, Token: "shared-token"},
+			{Host: secondHost, Token: "shared-token"},
+		},
+	}
+	if err := strmConfig.Init(); err != nil {
+		t.Fatalf("init strm config: %v", err)
+	}
+
+	oldConfig := config.C
+	t.Cleanup(func() { config.C = oldConfig })
+	config.C = &config.Config{
+		Emby:     &config.Emby{Strm: strmConfig},
+		Openlist: &config.Openlist{},
+	}
+
+	_, resolved, err := resolveStrmLink("http://nl.example/d/cloudreve-upload/test.mp4", nil)
+	if err == nil {
+		t.Fatal("resolveStrmLink() error = nil, want error when all candidates fail")
+	}
+	if resolved {
+		t.Fatal("resolveStrmLink() resolved = true, want false")
+	}
+	if firstCalls.Load() != 1 || secondCalls.Load() != 1 {
+		t.Fatalf("calls = first:%d second:%d, want both 1", firstCalls.Load(), secondCalls.Load())
 	}
 }
