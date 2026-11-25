@@ -1,5 +1,5 @@
-# 第一阶段: 构建 web 产物包
-FROM node:24-alpine AS web-builder
+# 第一阶段: 在构建宿主机原生构建架构无关的 web 静态产物，避免 QEMU 仿真运行 Node 崩溃或过慢
+FROM --platform=$BUILDPLATFORM node:24-alpine AS web-builder
 
 # 设置工作目录
 WORKDIR /app/web/src
@@ -14,8 +14,12 @@ COPY web/src .
 # 执行构建
 RUN npm run build
 
-# 第二阶段：构建 Go 二进制文件
-FROM golang:1.26-alpine AS builder
+# 第二阶段：在构建宿主机原生交叉编译 Go 静态二进制文件
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+
+# 目标运行平台参数（由 Docker Buildx 自动注入；空值时回退为当前环境架构）
+ARG TARGETOS
+ARG TARGETARCH
 
 # 设置工作目录
 WORKDIR /app
@@ -37,8 +41,8 @@ RUN go mod download
 # 复制前端产物包
 COPY --from=web-builder /app/web/src/build/client ./web/dist
 
-# 编译源码成静态链接的二进制文件
-RUN CGO_ENABLED=0 go build -tags=goexperiment.jsonv2 -a -installsuffix cgo -ldflags="-X main.ginMode=release" -o main .
+# 交叉编译源码成目标架构的静态链接二进制文件
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -tags=goexperiment.jsonv2 -a -installsuffix cgo -ldflags="-X main.ginMode=release" -o main .
 
 # 第三阶段：运行阶段
 FROM alpine:latest
