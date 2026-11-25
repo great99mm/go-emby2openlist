@@ -18,10 +18,17 @@ type Openlist struct {
 	LocalTreeGen *LocalTreeGen `yaml:"local-tree-gen"`
 }
 
+// OpenlistInstance 描述单个 StrmPro 可用的 Openlist 实例配置。
 type OpenlistInstance struct {
-	Host                   string `yaml:"host"`
-	Token                  string `yaml:"token"`
-	InternalRedirectEnable *bool  `yaml:"internal-redirect-enable"`
+	// Host Openlist 实例访问地址。
+	Host string `yaml:"host"`
+	// Token 访问该 Openlist 实例接口的密钥。
+	Token string `yaml:"token"`
+	// InternalRedirectEnable 单独控制该实例是否启用内部重定向；未配置时继承全局 strm 配置。
+	InternalRedirectEnable *bool `yaml:"internal-redirect-enable"`
+	// Priority 负载均衡权重（如 de 配 70、ch1 配 30 即按 70%/30% 分配）；
+	// 未配置时默认权重为 1；配置为 0 时在存在其他正权重节点的情况下不分配主流量。
+	Priority *int `yaml:"priority"`
 }
 
 func (a *Openlist) Init() error {

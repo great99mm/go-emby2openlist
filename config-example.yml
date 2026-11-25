@@ -35,8 +35,11 @@ emby:
     strmpro-instances:
       - host: https://openlist.example.com
         token: openlist-xxxxx
+        # 负载均衡权重（可选，默认 1；例如两个节点分别配 70 和 30 即按 70%/30% 分配；配 0 可暂停向该节点分流）
+        priority: 70
       - host: https://another-openlist.example.com
         token: openlist-yyyyy
+        priority: 30
         internal-redirect-enable: true
     # 是否启用 strm 内部重定向
     #

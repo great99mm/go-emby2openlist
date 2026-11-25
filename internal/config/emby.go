@@ -130,10 +130,17 @@ func (e *Emby) IsLocalMediaPath(p string) bool {
 	return false
 }
 
-// strmPathRule 描述单条远程 strm 路径映射规则，支持多个候选目标用于随机负载均衡。
+// strmPathRule 描述单条远程 strm 路径映射规则，支持多个候选目标用于负载均衡。
 type strmPathRule struct {
 	from    string
 	targets []string
+}
+
+// weightedPathCandidate 描述单个去重后的映射候选地址及其分配权重。
+type weightedPathCandidate struct {
+	target    string
+	mappedURL string
+	weight    int64
 }
 
 // Strm 保存远程 strm 路径映射与 StrmPro 配置。
@@ -149,14 +156,20 @@ type Strm struct {
 
 	// pathMap 初始化并归并后的路径映射规则，按首次出现的顺序自上而下匹配。
 	pathMap []strmPathRule
-	// randIntN 返回 [0, n) 内的随机整数；为空时使用标准库并发安全的 math/rand/v2.IntN。
-	randIntN func(n int) int
+	// randIntN 返回 [0, n) 内的随机整数；为空时使用标准库并发安全的 math/rand/v2.Int64N。
+	randIntN func(n int64) int64
 }
 
-// Init 初始化并校验 strm 路径映射规则。
+// Init 初始化并校验 strm 路径映射规则及 StrmPro 实例权重配置。
 // 支持在 "=>" 右侧使用 "|" 配置多个候选目标，也支持多行重复同一源片段自动合并，
 // 合并后保持该源片段首次出现时的匹配优先级。
 func (s *Strm) Init() error {
+	for i, instance := range s.StrmProInstances {
+		if instance.Priority != nil && *instance.Priority < 0 {
+			return fmt.Errorf("strmpro-instances[%d] (%s) 的 priority 配置错误: %d, 不能小于 0", i, instance.Host, *instance.Priority)
+		}
+	}
+
 	s.pathMap = make([]strmPathRule, 0, len(s.PathMap))
 	ruleIndex := make(map[string]int, len(s.PathMap))
 
@@ -210,14 +223,17 @@ func parseStrmPathTargets(rawRule, rawTarget string) ([]string, error) {
 }
 
 // MapPath 将传入路径按规则顺序进行首次命中映射。
-// 当命中规则存在多个候选目标时，等概率随机选取一个目标进行替换。
+// 当命中规则存在多个候选目标时，按实例配置的 priority 权重随机选取一个目标进行替换。
 func (s *Strm) MapPath(path string) string {
 	candidates := s.MapPathCandidates(path)
 	return candidates[0]
 }
 
 // MapPathCandidates 返回传入路径命中首条规则后的候选映射结果列表。
-// 多目标规则会先做均匀随机打乱再按顺序去重，既保证随机负载均衡，又便于调用方在节点异常时顺序回退；
+// 多目标规则会结合对应 Openlist 实例的 priority 权重做无放回加权随机排序：
+// 例如 de 配置 70、ch1 配置 30 时，首选中 de 的概率为 70%、ch1 为 30%，
+// 若首选节点异常则按剩余权重顺序回退；未配置 priority 时默认权重为 1；
+// priority 为 0 的节点在存在其他正权重节点时会被排除出候选列表。
 // 未命中任何规则或配置为空时，返回仅包含原路径的单元素切片。
 func (s *Strm) MapPathCandidates(path string) []string {
 	if s == nil {
@@ -229,52 +245,126 @@ func (s *Strm) MapPathCandidates(path string) []string {
 			continue
 		}
 
-		orderedTargets := s.shuffleUniqueTargets(rule.targets)
-		if len(orderedTargets) == 1 {
-			logs.Tip("映射路径: [%s] => [%s]", rule.from, orderedTargets[0])
+		weighted := s.buildWeightedCandidates(path, rule)
+		ordered, totalWeight := s.orderWeightedCandidates(weighted)
+		if len(rule.targets) == 1 {
+			logs.Tip("映射路径: [%s] => [%s]", rule.from, ordered[0].target)
 		} else {
-			logs.Tip("映射路径(负载均衡): [%s] => 优先 [%s] (候选数: %d)", rule.from, orderedTargets[0], len(orderedTargets))
+			logs.Tip("映射路径(负载均衡): [%s] => 优先 [%s] (权重: %d/%d, 候选数: %d)", rule.from, ordered[0].target, ordered[0].weight, totalWeight, len(ordered))
 		}
 
-		candidates := make([]string, 0, len(orderedTargets))
-		for _, target := range orderedTargets {
-			candidates = append(candidates, strings.Replace(path, rule.from, target, 1))
+		candidates := make([]string, 0, len(ordered))
+		for _, candidate := range ordered {
+			candidates = append(candidates, candidate.mappedURL)
 		}
 		return candidates
 	}
 	return []string{path}
 }
 
-// shuffleUniqueTargets 对候选目标执行均匀随机洗牌并去除重复目标，保留去重后的首个位置。
-func (s *Strm) shuffleUniqueTargets(targets []string) []string {
-	if len(targets) <= 1 {
-		return targets
-	}
+// buildWeightedCandidates 对规则中的候选目标去重并结合 StrmProInstances 的 priority 计算最终权重。
+// 当存在至少一个正权重候选时，自动过滤掉权重为 0 的节点；若全部候选权重均为 0，则回退为等权保底。
+func (s *Strm) buildWeightedCandidates(path string, rule strmPathRule) []weightedPathCandidate {
+	unique := make([]weightedPathCandidate, 0, len(rule.targets))
+	indexByTarget := make(map[string]int, len(rule.targets))
+	counts := make([]int64, 0, len(rule.targets))
 
-	shuffled := append([]string(nil), targets...)
-	for i := len(shuffled) - 1; i > 0; i-- {
-		j := s.intN(i + 1)
-		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
-	}
-
-	unique := make([]string, 0, len(shuffled))
-	seen := make(map[string]struct{}, len(shuffled))
-	for _, target := range shuffled {
-		if _, ok := seen[target]; ok {
+	for _, target := range rule.targets {
+		if idx, exists := indexByTarget[target]; exists {
+			counts[idx]++
 			continue
 		}
-		seen[target] = struct{}{}
-		unique = append(unique, target)
+		indexByTarget[target] = len(unique)
+		unique = append(unique, weightedPathCandidate{
+			target:    target,
+			mappedURL: strings.Replace(path, rule.from, target, 1),
+		})
+		counts = append(counts, 1)
+	}
+
+	positive := make([]weightedPathCandidate, 0, len(unique))
+	for i := range unique {
+		unique[i].weight = s.resolveCandidateWeight(unique[i].mappedURL, counts[i])
+		if unique[i].weight > 0 {
+			positive = append(positive, unique[i])
+		}
+	}
+	if len(positive) > 0 {
+		return positive
+	}
+
+	// 兜底：若规则下所有目标的 priority 均被设为 0，仍按等权保留候选避免请求完全无路可走。
+	for i := range unique {
+		unique[i].weight = 1
 	}
 	return unique
 }
 
-// intN 返回 [0, n) 范围内的随机整数。
-func (s *Strm) intN(n int) int {
+// resolveCandidateWeight 查询候选地址匹配实例的 priority 配置。
+// 若匹配到配置了 priority 的实例则返回该权重，否则回退为该目标在 path-map 中的出现次数（默认 1）。
+func (s *Strm) resolveCandidateWeight(mappedURL string, defaultWeight int64) int64 {
+	if len(s.StrmProInstances) == 0 {
+		return defaultWeight
+	}
+	instance, matched, err := MatchOpenlistInstance(mappedURL, s.StrmProInstances)
+	if err != nil || !matched || instance.Priority == nil {
+		return defaultWeight
+	}
+	if *instance.Priority <= 0 {
+		return 0
+	}
+	return int64(*instance.Priority)
+}
+
+// orderWeightedCandidates 按候选权重执行无放回加权随机抽样，返回排序后的候选列表及初始总权重。
+func (s *Strm) orderWeightedCandidates(candidates []weightedPathCandidate) ([]weightedPathCandidate, int64) {
+	if len(candidates) <= 1 {
+		var total int64
+		if len(candidates) == 1 {
+			total = candidates[0].weight
+		}
+		return candidates, total
+	}
+
+	remaining := append([]weightedPathCandidate(nil), candidates...)
+	var totalWeight int64
+	for _, candidate := range remaining {
+		totalWeight += candidate.weight
+	}
+	initialTotal := totalWeight
+
+	ordered := make([]weightedPathCandidate, 0, len(remaining))
+	for len(remaining) > 0 {
+		if len(remaining) == 1 {
+			ordered = append(ordered, remaining[0])
+			break
+		}
+
+		pick := s.int64N(totalWeight)
+		var acc int64
+		chosenIdx := len(remaining) - 1
+		for i, candidate := range remaining {
+			acc += candidate.weight
+			if pick < acc {
+				chosenIdx = i
+				break
+			}
+		}
+
+		chosen := remaining[chosenIdx]
+		ordered = append(ordered, chosen)
+		totalWeight -= chosen.weight
+		remaining = append(remaining[:chosenIdx], remaining[chosenIdx+1:]...)
+	}
+	return ordered, initialTotal
+}
+
+// int64N 返回 [0, n) 范围内的随机整数。
+func (s *Strm) int64N(n int64) int64 {
 	if s != nil && s.randIntN != nil {
 		return s.randIntN(n)
 	}
-	return rand.IntN(n)
+	return rand.Int64N(n)
 }
 
 // CustomCssJs 自定义 css js 配置

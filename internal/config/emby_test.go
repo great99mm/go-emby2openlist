@@ -158,13 +158,13 @@ func TestStrmMapPathCandidatesEdgeCases(t *testing.T) {
 		}
 	})
 
-	t.Run("重复目标在洗牌后去重避免重复回退同一节点", func(t *testing.T) {
+	t.Run("重复目标在去重后按出现次数作为默认权重", func(t *testing.T) {
 		s := &Strm{
 			PathMap: []string{
 				"//nl.ftp2.eu.org/ => //de.ftp2.eu.org/ | //de.ftp2.eu.org/ | //ch1.ftp2.eu.org/",
 			},
-			// 固定返回最大值索引，使洗牌保持原序以验证去重结果确定性。
-			randIntN: func(n int) int { return n - 1 },
+			// 总权重为 3（de=2, ch1=1），pick=0 命中 de，剩余 ch1 作为回退。
+			randIntN: func(n int64) int64 { return 0 },
 		}
 		if err := s.Init(); err != nil {
 			t.Fatalf("Init() error = %v", err)
@@ -177,6 +177,133 @@ func TestStrmMapPathCandidatesEdgeCases(t *testing.T) {
 		}
 		if !slices.Equal(got, want) {
 			t.Fatalf("MapPathCandidates() = %v, want %v", got, want)
+		}
+	})
+}
+
+func TestStrmPriorityWeightedLoadBalance(t *testing.T) {
+	intPtr := func(v int) *int { return &v }
+
+	t.Run("负数 priority 校验失败", func(t *testing.T) {
+		s := &Strm{
+			PathMap: []string{"//nl.ftp2.eu.org/ => //de.ftp2.eu.org/ | //ch1.ftp2.eu.org/"},
+			StrmProInstances: []OpenlistInstance{
+				{Host: "https://de.ftp2.eu.org", Token: "t", Priority: intPtr(-1)},
+			},
+		}
+		if err := s.Init(); err == nil {
+			t.Fatal("Init() error = nil, want error for negative priority")
+		}
+	})
+
+	t.Run("按 70/30 边界精确命中且保留回退候选", func(t *testing.T) {
+		var fixedPick int64
+		s := &Strm{
+			PathMap: []string{"//nl.ftp2.eu.org/ => //de.ftp2.eu.org/ | //ch1.ftp2.eu.org/"},
+			StrmProInstances: []OpenlistInstance{
+				{Host: "https://de.ftp2.eu.org", Token: "t", Priority: intPtr(70)},
+				{Host: "https://ch1.ftp2.eu.org", Token: "t", Priority: intPtr(30)},
+			},
+			randIntN: func(n int64) int64 {
+				if n != 100 {
+					t.Fatalf("randIntN n = %d, want 100", n)
+				}
+				return fixedPick
+			},
+		}
+		if err := s.Init(); err != nil {
+			t.Fatalf("Init() error = %v", err)
+		}
+
+		raw := "https://nl.ftp2.eu.org/d/movie.mkv"
+		wantDE := "https://de.ftp2.eu.org/d/movie.mkv"
+		wantCH1 := "https://ch1.ftp2.eu.org/d/movie.mkv"
+
+		// [0, 69] 对应 70% 命中 de，回退为 ch1。
+		for _, pick := range []int64{0, 69} {
+			fixedPick = pick
+			got := s.MapPathCandidates(raw)
+			if !slices.Equal(got, []string{wantDE, wantCH1}) {
+				t.Fatalf("pick=%d got %v, want [de, ch1]", pick, got)
+			}
+		}
+
+		// [70, 99] 对应 30% 命中 ch1，回退为 de。
+		for _, pick := range []int64{70, 99} {
+			fixedPick = pick
+			got := s.MapPathCandidates(raw)
+			if !slices.Equal(got, []string{wantCH1, wantDE}) {
+				t.Fatalf("pick=%d got %v, want [ch1, de]", pick, got)
+			}
+		}
+	})
+
+	t.Run("按 70/30 统计分布符合预期比例", func(t *testing.T) {
+		s := &Strm{
+			PathMap: []string{"//nl.ftp2.eu.org/ => //de.ftp2.eu.org/ | //ch1.ftp2.eu.org/"},
+			StrmProInstances: []OpenlistInstance{
+				{Host: "https://de.ftp2.eu.org", Token: "t", Priority: intPtr(70)},
+				{Host: "https://ch1.ftp2.eu.org", Token: "t", Priority: intPtr(30)},
+			},
+		}
+		if err := s.Init(); err != nil {
+			t.Fatalf("Init() error = %v", err)
+		}
+
+		const iterations = 2000
+		raw := "https://nl.ftp2.eu.org/d/movie.mkv"
+		wantDE := "https://de.ftp2.eu.org/d/movie.mkv"
+		wantCH1 := "https://ch1.ftp2.eu.org/d/movie.mkv"
+		counts := map[string]int{}
+		for range iterations {
+			counts[s.MapPath(raw)]++
+		}
+
+		// 期望 de ≈ 1400 (70%), ch1 ≈ 600 (30%)，允许宽裕的随机波动区间。
+		if counts[wantDE] < 1250 || counts[wantDE] > 1550 {
+			t.Fatalf("de count = %d out of %d, want around 70%%", counts[wantDE], iterations)
+		}
+		if counts[wantCH1] < 450 || counts[wantCH1] > 750 {
+			t.Fatalf("ch1 count = %d out of %d, want around 30%%", counts[wantCH1], iterations)
+		}
+	})
+
+	t.Run("priority 为 0 时自动排除该离线节点", func(t *testing.T) {
+		s := &Strm{
+			PathMap: []string{"//nl.ftp2.eu.org/ => //de.ftp2.eu.org/ | //ch1.ftp2.eu.org/"},
+			StrmProInstances: []OpenlistInstance{
+				{Host: "https://de.ftp2.eu.org", Token: "t", Priority: intPtr(70)},
+				{Host: "https://ch1.ftp2.eu.org", Token: "t", Priority: intPtr(0)},
+			},
+		}
+		if err := s.Init(); err != nil {
+			t.Fatalf("Init() error = %v", err)
+		}
+
+		raw := "https://nl.ftp2.eu.org/d/movie.mkv"
+		want := []string{"https://de.ftp2.eu.org/d/movie.mkv"}
+		for range 50 {
+			if got := s.MapPathCandidates(raw); !slices.Equal(got, want) {
+				t.Fatalf("MapPathCandidates() = %v, want %v", got, want)
+			}
+		}
+	})
+
+	t.Run("所有候选 priority 均为 0 时回退等权保底", func(t *testing.T) {
+		s := &Strm{
+			PathMap: []string{"//nl.ftp2.eu.org/ => //de.ftp2.eu.org/ | //ch1.ftp2.eu.org/"},
+			StrmProInstances: []OpenlistInstance{
+				{Host: "https://de.ftp2.eu.org", Token: "t", Priority: intPtr(0)},
+				{Host: "https://ch1.ftp2.eu.org", Token: "t", Priority: intPtr(0)},
+			},
+		}
+		if err := s.Init(); err != nil {
+			t.Fatalf("Init() error = %v", err)
+		}
+
+		got := s.MapPathCandidates("https://nl.ftp2.eu.org/d/movie.mkv")
+		if len(got) != 2 {
+			t.Fatalf("MapPathCandidates() len = %d, want 2 fallback candidates", len(got))
 		}
 	})
 }

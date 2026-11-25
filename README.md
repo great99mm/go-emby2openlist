@@ -288,8 +288,10 @@ emby:
     strmpro-instances:
       - host: https://openlist.example.com
         token: openlist-your-api-token
+        priority: 70
       - host: https://another-openlist.example.com
         token: another-openlist-api-token
+        priority: 30
         internal-redirect-enable: true
     internal-redirect-enable: false
 
@@ -307,6 +309,7 @@ openlist:
 5. OpenList token 属于敏感信息，只应保存在 `config.yml` 中，不要提交到仓库。
 6. 未配置 `strmpro-instances` 时会继续使用 `openlist.host/token`，兼容原有单实例配置。
 7. 实例可单独配置 `internal-redirect-enable`；未配置时继承 `strm.internal-redirect-enable`。
+8. 实例可配置 `priority` 控制多目标负载均衡权重（如 `70` 与 `30` 即按 70%/30% 分配，未配置默认权重为 `1`，设为 `0` 可暂停向该节点分配流量）。
 
 ## 使用说明 ssl
 

@@ -528,3 +528,79 @@ func TestResolveStrmLinkLoadBalanceAllFail(t *testing.T) {
 		t.Fatalf("calls = first:%d second:%d, want both 1", firstCalls.Load(), secondCalls.Load())
 	}
 }
+
+func TestResolveStrmLinkPriorityDistributionAndZeroDisable(t *testing.T) {
+	var deCalls, ch1Calls atomic.Int32
+
+	deServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"code":200,"message":"success","data":{"raw_url":"https://de-storage.example/video.mkv"}}`)
+	}))
+	t.Cleanup(deServer.Close)
+
+	ch1Server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ch1Calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"code":200,"message":"success","data":{"raw_url":"https://ch1-storage.example/video.mkv"}}`)
+	}))
+	t.Cleanup(ch1Server.Close)
+
+	deHost := deServer.URL
+	ch1Host := strings.Replace(ch1Server.URL, "127.0.0.1", "localhost", 1)
+
+	dePriority := 70
+	ch1Priority := 30
+	strmConfig := &config.Strm{
+		PathMap: []string{
+			fmt.Sprintf("http://nl.example/ => %s/ | %s/", deHost, ch1Host),
+		},
+		StrmPro: true,
+		StrmProInstances: []config.OpenlistInstance{
+			{Host: deHost, Token: "shared-token", Priority: &dePriority},
+			{Host: ch1Host, Token: "shared-token", Priority: &ch1Priority},
+		},
+	}
+	if err := strmConfig.Init(); err != nil {
+		t.Fatalf("init strm config: %v", err)
+	}
+
+	oldConfig := config.C
+	t.Cleanup(func() { config.C = oldConfig })
+	config.C = &config.Config{
+		Emby:     &config.Emby{Strm: strmConfig},
+		Openlist: &config.Openlist{},
+	}
+
+	const runs = 200
+	for range runs {
+		got, resolved, err := resolveStrmLink("http://nl.example/d/cloudreve-upload/test.mp4", nil)
+		if err != nil {
+			t.Fatalf("resolveStrmLink() error = %v", err)
+		}
+		if !resolved || (got != "https://de-storage.example/video.mkv" && got != "https://ch1-storage.example/video.mkv") {
+			t.Fatalf("resolveStrmLink() = (%q, %v), want de or ch1 link", got, resolved)
+		}
+	}
+	if deCalls.Load() <= ch1Calls.Load() || ch1Calls.Load() == 0 {
+		t.Fatalf("weighted calls = de:%d ch1:%d out of %d, want de > ch1 > 0", deCalls.Load(), ch1Calls.Load(), runs)
+	}
+
+	// 将 ch1 的 priority 置 0 后，请求应全部走 de，不再打到 ch1。
+	deCalls.Store(0)
+	ch1Calls.Store(0)
+	zero := 0
+	strmConfig.StrmProInstances[1].Priority = &zero
+	for range 20 {
+		got, resolved, err := resolveStrmLink("http://nl.example/d/cloudreve-upload/test.mp4", nil)
+		if err != nil {
+			t.Fatalf("resolveStrmLink(priority=0) error = %v", err)
+		}
+		if !resolved || got != "https://de-storage.example/video.mkv" {
+			t.Fatalf("resolveStrmLink(priority=0) = (%q, %v), want de link", got, resolved)
+		}
+	}
+	if deCalls.Load() != 20 || ch1Calls.Load() != 0 {
+		t.Fatalf("disabled ch1 calls = de:%d ch1:%d, want de:20 ch1:0", deCalls.Load(), ch1Calls.Load())
+	}
+}
