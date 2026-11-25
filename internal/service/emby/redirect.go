@@ -93,7 +93,8 @@ func Redirect2OpenlistLink(c *gin.Context) {
 
 	// 4 如果是远程地址 (strm), 重定向处理
 	if urls.IsHttpRemote(embyPath) {
-		finalPath, strmProResolved, err := resolveStrmLink(embyPath, c.Request.Header.Clone())
+		stickyKey := buildStrmStickyKey(c, itemInfo)
+		finalPath, strmProResolved, err := resolveStrmLinkWithSticky(embyPath, c.Request.Header.Clone(), stickyKey)
 		if checkErr(c, err) {
 			return
 		}
@@ -177,13 +178,43 @@ func Redirect2OpenlistLink(c *gin.Context) {
 	checkErr(c, fmt.Errorf("获取直链失败: %s", allErrors.String()))
 }
 
-// resolveStrmLink 应用 strm 路径映射，并按配置通过 Openlist API 刷新直链。
-// 当命中的路径映射包含多个候选目标时，按随机洗牌后的顺序执行负载均衡；
-// 在 StrmPro 模式下，若首选节点请求失败会自动回退到其余候选节点。
+// buildStrmStickyKey 按配置的会话粘性维度构建当前播放请求的粘性键。
+// 优先使用 Emby 访问令牌区分不同用户/设备；若请求未携带令牌则退化为客户端 IP。
+func buildStrmStickyKey(c *gin.Context, itemInfo ItemInfo) string {
+	userKey := strings.TrimSpace(itemInfo.ApiKey)
+	if userKey == "" && c != nil {
+		userKey = strings.TrimSpace(c.ClientIP())
+	}
+	if userKey == "" {
+		return ""
+	}
+	if config.C != nil && config.C.Emby != nil && config.C.Emby.Strm != nil &&
+		config.C.Emby.Strm.StickyScope == config.StickyScopeUser {
+		return userKey
+	}
+
+	itemKey := strings.TrimSpace(itemInfo.Id)
+	if originID := strings.TrimSpace(itemInfo.MsInfo.OriginId); originID != "" {
+		itemKey += ":" + originID
+	}
+	if itemKey == "" {
+		return userKey
+	}
+	return userKey + "|" + itemKey
+}
+
+// resolveStrmLink 应用 strm 路径映射，并按配置通过 Openlist API 刷新直链（不带会话粘性）。
 func resolveStrmLink(strmURL string, header http.Header) (string, bool, error) {
-	candidates := config.C.Emby.Strm.MapPathCandidates(strmURL)
+	return resolveStrmLinkWithSticky(strmURL, header, "")
+}
+
+// resolveStrmLinkWithSticky 应用 strm 路径映射与会话粘性，并按配置通过 Openlist API 刷新直链。
+// 当命中的路径映射包含多个候选目标时，结合会话粘性与平滑加权轮询选出主节点；
+// 在 StrmPro 模式下，若主节点请求失败会自动回退到其余候选节点并更新会话粘性记录。
+func resolveStrmLinkWithSticky(strmURL string, header http.Header, stickyKey string) (string, bool, error) {
+	plan := config.C.Emby.Strm.ResolvePathCandidates(strmURL, stickyKey)
 	if !config.C.Emby.Strm.StrmPro {
-		return getFinalRedirectLink(candidates[0], header), false, nil
+		return getFinalRedirectLink(plan.Candidates[0].MappedURL, header), false, nil
 	}
 
 	instances := config.C.Emby.Strm.StrmProInstances
@@ -194,16 +225,25 @@ func resolveStrmLink(strmURL string, header http.Header) (string, bool, error) {
 		}}
 	}
 
-	errs := make([]string, 0, len(candidates))
-	for idx, candidateURL := range candidates {
-		finalURL, resolved, err := resolveStrmProCandidate(candidateURL, header, instances)
+	errs := make([]string, 0, len(plan.Candidates))
+	for idx, candidate := range plan.Candidates {
+		finalURL, resolved, err := resolveStrmProCandidate(candidate.MappedURL, header, instances)
 		if err == nil {
+			// 若通过故障回退命中了备用节点，立即将当前会话粘性切换到健康的备用节点。
+			if idx > 0 && plan.Matched && stickyKey != "" {
+				config.C.Emby.Strm.UpdateStickyTarget(plan.RuleFrom, stickyKey, candidate.Target)
+			}
 			return finalURL, resolved, nil
 		}
 		errs = append(errs, err.Error())
-		if idx < len(candidates)-1 {
+		if idx < len(plan.Candidates)-1 {
 			logs.Warn("strmpro 候选节点解析失败, 尝试下一个候选节点: %v", err)
 		}
+	}
+
+	// 全部候选节点均失败时清理本次预写入的粘性记录，避免下次仍优先命中失效节点。
+	if plan.Matched && stickyKey != "" {
+		config.C.Emby.Strm.ClearStickyTarget(plan.RuleFrom, stickyKey)
 	}
 	return "", false, fmt.Errorf("%s", strings.Join(errs, "; "))
 }

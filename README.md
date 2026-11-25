@@ -280,10 +280,12 @@ emby:
   proxy-error-strategy: origin
   strm:
     # 如果 strm 已经是正确的 OpenList /d/ 地址，可以不配置 path-map
-    # 支持在 => 右侧用 | 配置多个目标（或重复同一源片段）实现随机负载均衡，节点异常时自动回退其余候选节点
+    # 支持在 => 右侧用 | 配置多个目标（或重复同一源片段）按实例 priority 平滑加权轮询，节点异常时自动回退其余候选节点
     path-map:
       - https://old-openlist.example.com/d/local/ => https://local-openlist.example.com/d/local/
       - https://old-openlist.example.com => https://openlist.example.com | https://another-openlist.example.com
+    sticky-ttl: 30m
+    sticky-scope: user-item
     strmpro: true
     strmpro-instances:
       - host: https://openlist.example.com
@@ -309,7 +311,8 @@ openlist:
 5. OpenList token 属于敏感信息，只应保存在 `config.yml` 中，不要提交到仓库。
 6. 未配置 `strmpro-instances` 时会继续使用 `openlist.host/token`，兼容原有单实例配置。
 7. 实例可单独配置 `internal-redirect-enable`；未配置时继承 `strm.internal-redirect-enable`。
-8. 实例可配置 `priority` 控制多目标负载均衡权重（如 `70` 与 `30` 即按 70%/30% 分配，未配置默认权重为 `1`，设为 `0` 可暂停向该节点分配流量）。
+8. 实例可配置 `priority` 控制多目标平滑加权轮询比例（如 `70` 与 `30` 每 10 次新分配严格为 7 次与 3 次并均匀穿插，未配置默认权重为 `1`，设为 `0` 可暂停向该节点分配流量）。
+9. 多目标负载均衡默认开启 30 分钟按“用户 + 影片”维度的会话粘性（`sticky-ttl: 30m`、`sticky-scope: user-item`），同一用户看同一影片拖动进度条固定走同一节点，不同用户看同一影片仍按权重分流；也可设为 `sticky-scope: user` 或 `sticky-ttl: 0` 关闭粘性。
 
 ## 使用说明 ssl
 

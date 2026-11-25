@@ -582,8 +582,8 @@ func TestResolveStrmLinkPriorityDistributionAndZeroDisable(t *testing.T) {
 			t.Fatalf("resolveStrmLink() = (%q, %v), want de or ch1 link", got, resolved)
 		}
 	}
-	if deCalls.Load() <= ch1Calls.Load() || ch1Calls.Load() == 0 {
-		t.Fatalf("weighted calls = de:%d ch1:%d out of %d, want de > ch1 > 0", deCalls.Load(), ch1Calls.Load(), runs)
+	if deCalls.Load() != 140 || ch1Calls.Load() != 60 {
+		t.Fatalf("weighted SWRR calls = de:%d ch1:%d out of %d, want 140/60", deCalls.Load(), ch1Calls.Load(), runs)
 	}
 
 	// 将 ch1 的 priority 置 0 后，请求应全部走 de，不再打到 ch1。
@@ -602,5 +602,110 @@ func TestResolveStrmLinkPriorityDistributionAndZeroDisable(t *testing.T) {
 	}
 	if deCalls.Load() != 20 || ch1Calls.Load() != 0 {
 		t.Fatalf("disabled ch1 calls = de:%d ch1:%d, want de:20 ch1:0", deCalls.Load(), ch1Calls.Load())
+	}
+}
+
+func TestResolveStrmLinkStickyAndFailoverUpdate(t *testing.T) {
+	var deCalls, ch1Calls atomic.Int32
+	var deDown atomic.Bool
+
+	deServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deCalls.Add(1)
+		if deDown.Load() {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"code":200,"message":"success","data":{"raw_url":"https://de-storage.example/video.mkv"}}`)
+	}))
+	t.Cleanup(deServer.Close)
+
+	ch1Server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ch1Calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"code":200,"message":"success","data":{"raw_url":"https://ch1-storage.example/video.mkv"}}`)
+	}))
+	t.Cleanup(ch1Server.Close)
+
+	deHost := deServer.URL
+	ch1Host := strings.Replace(ch1Server.URL, "127.0.0.1", "localhost", 1)
+	dePriority := 70
+	ch1Priority := 30
+
+	strmConfig := &config.Strm{
+		PathMap: []string{
+			fmt.Sprintf("http://nl.example/ => %s/ | %s/", deHost, ch1Host),
+		},
+		StrmPro: true,
+		StrmProInstances: []config.OpenlistInstance{
+			{Host: deHost, Token: "shared-token", Priority: &dePriority},
+			{Host: ch1Host, Token: "shared-token", Priority: &ch1Priority},
+		},
+		StickyTTL:   "30m",
+		StickyScope: config.StickyScopeUserItem,
+	}
+	if err := strmConfig.Init(); err != nil {
+		t.Fatalf("init strm config: %v", err)
+	}
+
+	oldConfig := config.C
+	t.Cleanup(func() { config.C = oldConfig })
+	config.C = &config.Config{
+		Emby:     &config.Emby{Strm: strmConfig},
+		Openlist: &config.Openlist{},
+	}
+
+	// 用户 A 首次播放命中 de，随后连续拖动进度条 5 次均应固定走 de。
+	userAKey := "token-user-a|item-926878:ms-1"
+	for range 6 {
+		got, resolved, err := resolveStrmLinkWithSticky("http://nl.example/d/cloudreve-upload/test.mp4", nil, userAKey)
+		if err != nil || !resolved || got != "https://de-storage.example/video.mkv" {
+			t.Fatalf("user A got (%q, %v, %v), want de", got, resolved, err)
+		}
+	}
+	if deCalls.Load() != 6 || ch1Calls.Load() != 0 {
+		t.Fatalf("sticky calls = de:%d ch1:%d, want de:6 ch1:0", deCalls.Load(), ch1Calls.Load())
+	}
+
+	// 模拟 de 突然故障：用户 A 再次拖动进度条应自动回退到 ch1 并更新粘性记录。
+	deDown.Store(true)
+	got, resolved, err := resolveStrmLinkWithSticky("http://nl.example/d/cloudreve-upload/test.mp4", nil, userAKey)
+	if err != nil || !resolved || got != "https://ch1-storage.example/video.mkv" {
+		t.Fatalf("failover got (%q, %v, %v), want ch1", got, resolved, err)
+	}
+	if deCalls.Load() != 7 || ch1Calls.Load() != 1 {
+		t.Fatalf("after failover calls = de:%d ch1:%d, want de:7 ch1:1", deCalls.Load(), ch1Calls.Load())
+	}
+
+	// 后续拖动进度条应直接命中已更新的粘性节点 ch1，不再重复打到故障的 de。
+	for range 3 {
+		got, resolved, err = resolveStrmLinkWithSticky("http://nl.example/d/cloudreve-upload/test.mp4", nil, userAKey)
+		if err != nil || !resolved || got != "https://ch1-storage.example/video.mkv" {
+			t.Fatalf("post-failover sticky got (%q, %v, %v), want ch1", got, resolved, err)
+		}
+	}
+	if deCalls.Load() != 7 || ch1Calls.Load() != 4 {
+		t.Fatalf("post-failover calls = de:%d ch1:%d, want de:7 ch1:4", deCalls.Load(), ch1Calls.Load())
+	}
+}
+
+func TestBuildStrmStickyKey(t *testing.T) {
+	oldConfig := config.C
+	t.Cleanup(func() { config.C = oldConfig })
+
+	item := ItemInfo{
+		Id:     "926878",
+		ApiKey: "user-token-1",
+		MsInfo: MsInfo{OriginId: "mediasource_1"},
+	}
+
+	config.C = &config.Config{Emby: &config.Emby{Strm: &config.Strm{StickyScope: config.StickyScopeUserItem}}}
+	if got := buildStrmStickyKey(nil, item); got != "user-token-1|926878:mediasource_1" {
+		t.Fatalf("user-item key = %q, want %q", got, "user-token-1|926878:mediasource_1")
+	}
+
+	config.C = &config.Config{Emby: &config.Emby{Strm: &config.Strm{StickyScope: config.StickyScopeUser}}}
+	if got := buildStrmStickyKey(nil, item); got != "user-token-1" {
+		t.Fatalf("user key = %q, want %q", got, "user-token-1")
 	}
 }
